@@ -38,7 +38,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/clip # 修改为你想要的镜像名
+          images: ghcr.io/${{ github.repository_owner }}/subapi # 修改为你想要的镜像名
           tags: |
             # 为最新的 commit 生成 sha- 开头的标签 (例如 sha-a1b2c3d)
             type=sha,prefix=sha-
