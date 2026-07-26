@@ -1,7 +1,7 @@
 FROM weishaw/sub2api:latest
 
-LABEL maintainer="Sub2API + CF Tunnel for Render"
-LABEL description="Strict mode - No fallback, strong diagnostics"
+LABEL maintainer="Sub2API + CF Tunnel for Render (Fixed DB Config)"
+LABEL description="Correct database config structure + diagnostics"
 
 RUN apk add --no-cache dumb-init curl ca-certificates tzdata && \
     ARCH=$(apk --print-arch) && \
@@ -19,62 +19,54 @@ COPY <<'EOF' /app/docker-entrypoint.sh
 set -e
 
 echo "============================================================="
-echo "🚀 Sub2API Render 启动 - 严格诊断版（无任何兜底）"
+echo "🚀 Sub2API Render 启动 - 修复版（正确 config 结构）"
 echo "📍 PORT = ${PORT:-8080}"
 echo "============================================================="
 
-# ==================== 关键环境变量诊断（不输出具体值）===================
-echo "🔍 环境变量诊断结果："
-echo "   • DATABASE_URL          : $([ -n "${DATABASE_URL}" ] && echo "[SET]" || echo "[MISSING!]")"
-echo "   • REDIS_URL             : $([ -n "${REDIS_URL}" ] && echo "[SET]" || echo "[MISSING!]")"
-echo "   • JWT_SECRET            : $([ -n "${JWT_SECRET}" ] && echo "[SET]" || echo "[MISSING!]")"
-echo "   • TOTP_ENCRYPTION_KEY   : $([ -n "${TOTP_ENCRYPTION_KEY}" ] && echo "[SET]" || echo "[MISSING!]")"
-echo "   • ADMIN_EMAIL           : $([ -n "${ADMIN_EMAIL}" ] && echo "[SET]" || echo "[MISSING]")"
-echo "   • ADMIN_PASSWORD        : $([ -n "${ADMIN_PASSWORD}" ] && echo "[SET]" || echo "[MISSING]")"
-echo "   • TUNNEL_TOKEN          : $([ -n "${TUNNEL_TOKEN}" ] && echo "[SET]" || echo "[NOT SET (DIRECT MODE)]")"
+# ==================== 严格环境变量检查 ====================
+echo "🔍 环境变量检查："
+echo "   • DATABASE_URL        : $([ -n "${DATABASE_URL}" ] && echo "[SET]" || echo "[MISSING!]")"
+echo "   • REDIS_URL           : $([ -n "${REDIS_URL}" ] && echo "[SET]" || echo "[MISSING!]")"
+echo "   • JWT_SECRET          : $([ -n "${JWT_SECRET}" ] && echo "[SET]" || echo "[MISSING!]")"
+echo "   • TOTP_ENCRYPTION_KEY : $([ -n "${TOTP_ENCRYPTION_KEY}" ] && echo "[SET]" || echo "[MISSING!]")"
 echo "============================================================="
 
-# 严格检查，缺失就直接失败（不做任何自动生成）
-if [ -z "$DATABASE_URL" ]; then
-    echo "❌ 错误: DATABASE_URL 未读取到"
+if [ -z "$DATABASE_URL" ] || [ -z "$REDIS_URL" ] || [ -z "$JWT_SECRET" ] || [ -z "$TOTP_ENCRYPTION_KEY" ]; then
+    echo "❌ 错误：存在必须的环境变量未设置"
     exit 1
 fi
 
-if [ -z "$REDIS_URL" ]; then
-    echo "❌ 错误: REDIS_URL 未读取到"
-    exit 1
-fi
+# 解析 DATABASE_URL 为官方要求的拆分字段
+echo "🔧 正在解析 DATABASE_URL..."
+# 简单解析 postgres://user:pass@host:port/dbname?sslmode=...
+DB_USER=$(echo "${DATABASE_URL}" | sed -E 's|.*://([^:]+):.*|\1|')
+DB_PASS=$(echo "${DATABASE_URL}" | sed -E 's|.*://[^:]+:([^@]+)@.*|\1|')
+DB_HOST=$(echo "${DATABASE_URL}" | sed -E 's|.*@([^:]+):.*|\1|')
+DB_PORT=$(echo "${DATABASE_URL}" | sed -E 's|.*:([0-9]+)/.*|\1|')
+DB_NAME=$(echo "${DATABASE_URL}" | sed -E 's|.*/([^?]+).*|\1|')
 
-if [ -z "$JWT_SECRET" ]; then
-    echo "❌ 错误: JWT_SECRET 未读取到"
-    echo "   请确认你在 Render 的 Environment 变量中真的设置了 JWT_SECRET"
-    echo "   注意：变量名称必须完全大写，且必须是 Production 环境而非 Preview"
-    exit 1
-fi
-
-if [ -z "$TOTP_ENCRYPTION_KEY" ]; then
-    echo "❌ 错误: TOTP_ENCRYPTION_KEY 未读取到"
-    exit 1
-fi
-
-echo "✅ 所有关键环境变量均已检测到"
+echo "✅ 解析完成 → Host: ${DB_HOST}, Port: ${DB_PORT}, DB: ${DB_NAME}"
 
 # 清理旧配置
-rm -rf /app/data/*
+rm -rf /app/data/* /app/config.yaml 2>/dev/null || true
 mkdir -p /app/data
 chmod 755 /app/data
 
-echo "🛠️ 正在生成 config.yaml（内容已隐藏）..."
+echo "🛠️ 生成 config.yaml 到 /app/config.yaml 和 /app/data/config.yaml ..."
 
-cat > /app/data/config.yaml << CONFIG
+cat > /app/config.yaml << CONFIG
 server:
   host: "0.0.0.0"
   port: ${PORT:-8080}
   mode: "release"
 
 database:
-  url: "${DATABASE_URL}"
-  type: "postgres"
+  host: "${DB_HOST}"
+  port: ${DB_PORT}
+  user: "${DB_USER}"
+  password: "${DB_PASS}"
+  dbname: "${DB_NAME}"
+  sslmode: "require"
 
 redis:
   url: "${REDIS_URL}"
@@ -95,13 +87,11 @@ default:
 security:
   url_allowlist_enabled: true
   url_allowlist_allow_insecure_http: false
-
-admin:
-  email: "${ADMIN_EMAIL:-admin@admin.com}"
-  password: "${ADMIN_PASSWORD:-admin123}"
 CONFIG
 
-echo "✅ config.yaml 已生成"
+cp /app/config.yaml /app/data/config.yaml
+
+echo "✅ config.yaml 已生成（内容已隐藏）"
 echo "============================================================="
 
 if [ -n "${TUNNEL_TOKEN:-}" ]; then
@@ -109,8 +99,8 @@ if [ -n "${TUNNEL_TOKEN:-}" ]; then
     cloudflared tunnel --no-autoupdate run --protocol http2 --token "$TUNNEL_TOKEN" > /proc/1/fd/1 2>&1 &
 fi
 
-echo "⏳ 等待数据库就绪 (10秒)..."
-sleep 10
+echo "⏳ 等待数据库就绪 (12秒)..."
+sleep 12
 
 echo "🌟 启动 Sub2API 主进程..."
 exec dumb-init /app/sub2api
